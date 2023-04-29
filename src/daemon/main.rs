@@ -142,13 +142,13 @@ impl<T: Stream<Item = f32> + Unpin + Send> Sensor for MicStream<T> {
     }
 }
 
-async fn microphone_sensor() -> impl Sensor {
+async fn microphone_sensor(sample_rate: usize) -> impl Sensor {
     let mic_stream = microphone_stream().await;
 
     MicStream {
         inner: mic_stream
             .flat_map(|x| futures::stream::iter(x))
-            .chunks(44000 / 100)
+            .chunks(44000 / sample_rate)
             .map(|x| x.iter().map(|x| x.abs()).sum::<f32>() / x.len() as f32), // downsample
     }
 }
@@ -158,17 +158,26 @@ async fn microphone_sensor() -> impl Sensor {
 #[command(author, version, about, long_about = None)]
 struct Opt {
     /// Number of raw samples to keep in memory. Used to predict whether new samples are a low or a high signal. Higher will take longer to adjust to changes, but it must be at least as long as a symbol (e.g. a dot-dash)
-    #[arg(long, default_value = "300")]
+    #[arg(long, default_value = "500")]
     raw_window_size: usize,
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value = "40")]
     /// The number of run-lengths to store (transitions between high and low). Used to estimate the symbol length. Higher memory will be more accurate, but will take longer to adjust to changes in the symbol length.
     run_length_memory_size: usize,
-    #[arg(long, default_value = "7.0")]
+    #[arg(long, default_value = "3.0")]
     /// Sigma of the gaussian blur. Higher will make it more noise resistant, but can make it miss very short dit-s. 
     sigma: f64,
-    #[arg(long, default_value = "100")]
+    #[arg(long, default_value = "50")]
     /// Number of samples to wait before processing it.
     lag: usize,
+    #[arg(long, default_value = "0.9")]
+    /// Discount factor on the threshold value. Closer to 1 will make changes in high/low thresholding slower.
+    mean_discount_factor: f64,
+    #[arg(long, default_value = "0.3")]
+    /// Centered region to ignore high/low transitions in. (Between 0 and 1, values lower than 0.5 recommended)
+    deadzone: f64,
+    #[arg(long, default_value = "100")]
+    /// Samples per second to downsample to
+    sample_rate: usize,
 }
 
 #[tokio::main]
@@ -241,7 +250,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // use textplots::{Chart, Plot, Shape};
 
     // let mut sensor = input.iter().cycle().copied();
-    let mut sensor = microphone_sensor().await;
+    let mut sensor = microphone_sensor(opt.sample_rate).await;
 
     let mut symbols = Vec::with_capacity(10);
     let mut decoded = VecDeque::with_capacity(10);
@@ -263,6 +272,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     let mut prev = false;
+    let mut discounted_mean = 0.0;
+    let mut first = true;
 
     while running.load(Ordering::SeqCst) {
         use Sensor;
@@ -282,21 +293,26 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         let mean = sensor_data.iter().sum::<f64>() / sensor_data.len() as f64;
+        if first {
+            discounted_mean = mean;
+            first = false;
+        } else {
+            discounted_mean *= opt.mean_discount_factor;
+            discounted_mean += (1.0 - opt.mean_discount_factor) * mean;
+        }
         let min = sensor_data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
         let max = sensor_data.iter().fold(-f64::INFINITY, |a, &b| a.max(b));
         let span = max - min;
-        let deadzone = 0.3; // dont make decisions in the middle 30%
-        let deadzone_min = 0.5 - deadzone / 2.;
-        let deadzone_max = 0.5 + deadzone / 2.;
-        let deadzone_min = span * deadzone_min + min;
-        let deadzone_max = span * deadzone_max + min;
+        let deadzone = opt.deadzone; // dont make decisions in the middle 30%
+        let deadzone_min = discounted_mean - span * deadzone / 2.;
+        let deadzone_max = discounted_mean + span * deadzone / 2.;
         let mid = sensor_data.len() - lag;
         let bl = gaussian_blur_average(&sensor_data, mid, &kernel);
         let new = if bl > deadzone_min && bl < deadzone_max {
             // debug!("In deadzone with {deadzone_min} < {bl} < {deadzone_max} (data range: {min} - {max})");
             prev
         } else {
-            bl > mean
+            bl > discounted_mean
         };
         blurred.push(new as i8);
         if new == prev {
@@ -304,18 +320,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             let low_dit_length = lengths[false as usize].map(|low_lengths| low_lengths[0]);
             if let Some(low_dit_length) = low_dit_length {
-                if !prev && run_length >= 6 * low_dit_length && low_dit_length > 1 {
-                    // discard space lengths longer than 5 times the dot length
-                    debug!("Lowering long space: {run_length} long space; expected up to 6 * {} = {}. Lowering to {}", low_dit_length, 6 * low_dit_length, 3 * low_dit_length);
-                    run_length = 3 * low_dit_length;
+                let max_factor = 4;
+                if !prev && run_length >= max_factor * low_dit_length && low_dit_length >= 1 {
+                    // discard space lengths longer than max_factor times the dot length
+                    debug!("Lowering long space: {run_length} long space; expected up to {max_factor} * {} = {}. Lowering to {}", low_dit_length, max_factor * low_dit_length, 3 * low_dit_length);
+                    run_length = (3 * low_dit_length).min(opt.lag as i32);
                 }
             }
-            run_lengths.push_back((prev, run_length));
-            run_length = 1;
-
             if run_lengths.len() >= run_lengths.capacity() {
                 run_lengths.pop_front();
             }
+            run_lengths.push_back((prev, run_length));
+            run_length = 1;
 
             // update estimates of lengths
             for mode in [false, true] {
@@ -334,10 +350,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if let [Some([inter_symbol_length, space_length]), Some([dot_length, dash_length])] =
                 lengths
             {
+                let space_length = 3*dot_length;
                 dot_lengths.push(dot_length);
                 // dbg!(lengths);
 
-                let (symbol, run_length) = run_lengths[run_lengths.len() / 2];
+                let (symbol, run_length) = run_lengths[run_lengths.len() - 1];
 
                 debug!("Classifying {symbol} with run_length {run_length} using {lengths:?}");
                 // classify currently looked at run_length
@@ -365,7 +382,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             decoded.push_back(letter);
                             print!("{letter}");
                             let decoded_string: String = decoded.iter().collect();
-                            info!("Decoded: {decoded_string}, mean: {mean}");
+                            info!("Decoded: {decoded_string}, discounted_mean: {discounted_mean}");
                         } else {
                             debug!("Invalid morse sequence");
                             print!("?");
