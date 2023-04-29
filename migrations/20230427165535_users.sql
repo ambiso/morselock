@@ -1,0 +1,6 @@
+-- Add migration script here
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+    name TEXT UNIQUE NOT NULL,
+    secret BLOB(32) NOT NULL
+);
