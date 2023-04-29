@@ -62,7 +62,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let mut buffer = String::new();
             reader.read_line(&mut buffer).await?;
 
-
             if totp.check_current(buffer.trim())? {
                 println!("User added.");
                 sqlx::query!(

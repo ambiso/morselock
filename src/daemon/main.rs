@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
-use tokio::io::{AsyncReadExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc as async_mpsc;
 
 use std::{collections::VecDeque, error::Error, str::FromStr};
@@ -21,8 +21,8 @@ use cpal::{InputCallbackInfo, StreamConfig};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 
+use clap::{arg, Parser};
 use serde_derive::Deserialize;
-use clap::{Parser, arg};
 
 #[async_trait]
 trait Sensor {
@@ -153,7 +153,6 @@ async fn microphone_sensor(sample_rate: usize) -> impl Sensor {
     }
 }
 
-
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Opt {
@@ -164,7 +163,7 @@ struct Opt {
     /// The number of run-lengths to store (transitions between high and low). Used to estimate the symbol length. Higher memory will be more accurate, but will take longer to adjust to changes in the symbol length.
     run_length_memory_size: usize,
     #[arg(long, default_value = "3.0")]
-    /// Sigma of the gaussian blur. Higher will make it more noise resistant, but can make it miss very short dit-s. 
+    /// Sigma of the gaussian blur. Higher will make it more noise resistant, but can make it miss very short dit-s.
     sigma: f64,
     #[arg(long, default_value = "50")]
     /// Number of samples to wait before processing it.
@@ -350,7 +349,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if let [Some([inter_symbol_length, space_length]), Some([dot_length, dash_length])] =
                 lengths
             {
-                let space_length = 3*dot_length;
+                let space_length = 3 * dot_length;
                 dot_lengths.push(dot_length);
                 // dbg!(lengths);
 
