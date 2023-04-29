@@ -36,10 +36,16 @@ fn get_lengths(d: impl Iterator<Item = bool>, mode: bool) -> [i32; 2] {
         }
         prev = cur;
     }
-    let mut lengths: [_; 2] = k_means_clustering(&run_lengths);
+    let mut lengths: [_; 2] = k_means_clustering(None, &run_lengths);
     lengths.sort();
     lengths
 }
+
+// fn get_lengths(run_lengths: , mode: bool) -> [i32; 2] {
+//     let mut lengths: [_; 2] = k_means_clustering(&run_lengths);
+//     lengths.sort();
+//     lengths
+// }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -52,15 +58,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     sqlx::migrate!().run(&mut db).await?;
 
     let raw_window_size = 200;
-    let thresholded_window_size = 400;
+    let run_lengths_size = 20;
     let mut sensor_data = VecDeque::with_capacity(raw_window_size);
-    let mut thresholded = VecDeque::with_capacity(thresholded_window_size);
     let mut sum = 0.0;
 
     let dot_len = 10;
     let dash_len = 30;
     let inter_symbol_len = 10;
-    let space_len = 30;
+    let space_len = 20;
     let mut input = vec![0.0; 50];
     input.extend("YOLO".chars().flat_map(|ch| {
         let encoded = encode_letter(ch).unwrap();
@@ -106,58 +111,92 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut dot_lengths = Vec::new();
 
+    let mut run_length = 1;
+    let mut run_lengths = VecDeque::with_capacity(run_lengths_size);
 
-    // let mut prev = false;
-    // let mut run_length = 0;
-    // let mut run_lengths= VecDeque::with_capacity(thresholded_window_size);
+    let mut lengths: [Option<[i32; 2]>; 2] = [None, None];
+
+    let mut n = 20;
 
     loop {
         if sensor_data.len() >= raw_window_size {
             sum -= sensor_data.pop_front().unwrap();
             let mean = sum / sensor_data.len() as f64;
+            // TODO: blur data
+            let prev = sensor_data[sensor_data.len() / 2 - 1] > mean;
             let new = sensor_data[sensor_data.len() / 2] > mean;
-            thresholded.push_back(new);
+            if new == prev {
+                run_length += 1;
+            } else {
+                let max_space_length =
+                    lengths[false as usize].map(|low_lengths| 4 * low_lengths[0]);
+                if let Some(max_space_length) = max_space_length {
+                    if !prev && run_length > max_space_length {
+                        // discard space lengths longer than 5 times the dot length
+                        eprintln!("Discarding run length {run_length} because it is too long");
+                        run_length = max_space_length;
+                    }
+                }
+                run_lengths.push_back((prev, run_length));
+                run_length = 1;
 
-            if thresholded.len() >= thresholded_window_size {
-                thresholded.pop_front();
-                // determine length of dots, dashes and spaces
-                let [dot_length, dash_length] = get_lengths(thresholded.iter().copied(), true);
-                let [inter_symbol_length, space_length] =
-                    get_lengths(thresholded.iter().copied(), true);
+                if run_lengths.len() >= run_lengths_size {
+                    run_lengths.pop_front();
 
-                let prev = thresholded[thresholded.len() - 2];
-                dot_lengths.push(space_length);
-                if prev != new {
-                    // decode symbol!
-                    let run_length = thresholded
-                        .iter()
-                        .rev()
-                        .skip(1)
-                        .take_while(|x| **x == prev)
-                        .count() as i32;
-                    if prev {
-                        if (run_length - dot_length).abs() < (run_length - dash_length).abs() {
-                            // dot
-                            symbols.push(MorseSymbol::Dot);
-                        } else {
-                            // dash
-                            symbols.push(MorseSymbol::Dash);
-                        }
-                    } else {
-                        if (run_length - inter_symbol_length).abs()
-                            < (run_length - space_length).abs()
-                        {
-                            // inter symbol (awaiting next dot or dash)
-                        } else {
-                            // finish this letter
-                            dbg!(&symbols);
-                            if let Some(letter) = decode_morse_symbol_sequence(&symbols) {
-                                decoded.push_back(letter);
+                    // update estimates of lengths
+                    for mode in [false, true] {
+                        let run_lengths = run_lengths
+                            .iter()
+                            .filter(|x| x.0 == mode)
+                            .map(|x| x.1)
+                            .collect::<Vec<_>>();
+
+                        // dbg!(&run_lengths);
+                        lengths[mode as usize] =
+                            Some(k_means_clustering(lengths[mode as usize], &run_lengths));
+                    }
+                    if let [Some([inter_symbol_length, space_length]), Some([dot_length, dash_length])] =
+                        lengths
+                    {
+                        dot_lengths.push(dot_length);
+                        // dbg!(lengths);
+
+                        let (symbol, run_length) = run_lengths[run_lengths.len() / 2];
+
+                        eprintln!("Classifying {symbol} with run_length {run_length}");
+                        // classify currently looked at run_length
+                        if symbol {
+                            // are we looking for dot/dash or for spacing?
+                            if (run_length - dot_length).abs() < (run_length - dash_length).abs() {
+                                // dot
+                                eprintln!("Dot");
+                                symbols.push(MorseSymbol::Dot);
+                            } else {
+                                // dash
+                                eprintln!("Dash");
+                                symbols.push(MorseSymbol::Dash);
                             }
-                            if decoded.len() > 4 {
-                                break;
+                        } else {
+                            if (run_length - inter_symbol_length).abs()
+                                < (run_length - space_length).abs()
+                            {
+                                // inter symbol (awaiting next dot or dash)
+                                eprintln!("Waiting for next symbol");
+                            } else {
+                                // finish this letter
+                                // dbg!(&symbols);
+                                n -= 1;
+                                if n == 0 {
+                                    break;
+                                }
+                                if let Some(letter) = decode_morse_symbol_sequence(&symbols) {
+                                    decoded.push_back(letter);
+                                }
+                                if decoded.len() > 10 {
+                                    break;
+                                }
+                                symbols.clear();
                             }
-                            symbols.clear();
                         }
                     }
                 }

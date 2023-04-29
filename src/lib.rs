@@ -68,12 +68,20 @@ pub fn encode_letter(ch: char) -> Option<&'static [MorseSymbol]> {
     ENCODE_MORSE_MAP.get(&ch).copied()
 }
 
-pub fn k_means_clustering<const N: usize>(data: &[i32]) -> [i32; N] {
-    let mean = (data.iter().map(|x| *x as i64).sum::<i64>() / data.len() as i64) as i32;
-    let mut means = [0i32; N];
-    for (i, x) in means.iter_mut().enumerate() {
-        *x = mean + i as i32 - (N as i32 / 2);
-    }
+pub fn k_means_clustering<const N: usize>(
+    starting_means: Option<[i32; N]>,
+    data: &[i32],
+) -> [i32; N] {
+    let mut means = if let Some(starting_means) = starting_means {
+        starting_means
+    } else {
+        let mean = (data.iter().map(|x| *x as i64).sum::<i64>() / data.len() as i64) as i32;
+        let mut means = [0i32; N];
+        for (i, x) in means.iter_mut().enumerate() {
+            *x = mean + i as i32 - (N as i32 / 2);
+        }
+        means
+    };
 
     loop {
         let mut sums = [0i64; N];
@@ -104,6 +112,8 @@ pub fn k_means_clustering<const N: usize>(data: &[i32]) -> [i32; N] {
         means = new_means;
     }
 
+    means.sort();
+
     means
 }
 
@@ -113,18 +123,21 @@ mod tests {
 
     #[test]
     fn test_clustering() {
-        assert_eq!(k_means_clustering(&[10, 10, 10, 20, 20, 20]), [10, 20]);
         assert_eq!(
-            k_means_clustering(&[10, 10, 10, 10, 10, 10, 20, 20, 20]),
+            k_means_clustering(None, &[10, 10, 10, 20, 20, 20]),
             [10, 20]
         );
         assert_eq!(
-            k_means_clustering(&[9, 9, 10, 10, 10, 10, 11, 11, 19, 20, 21]),
+            k_means_clustering(None, &[10, 10, 10, 10, 10, 10, 20, 20, 20]),
             [10, 20]
         );
-        assert_eq!(k_means_clustering(&[1, 2, 3]), [1, 2, 3]);
         assert_eq!(
-            k_means_clustering(&[10, 10, 10, 20, 20, 20, 30, 30, 30]),
+            k_means_clustering(None, &[9, 9, 10, 10, 10, 10, 11, 11, 19, 20, 21]),
+            [10, 20]
+        );
+        assert_eq!(k_means_clustering(None, &[1, 2, 3]), [1, 2, 3]);
+        assert_eq!(
+            k_means_clustering(None, &[10, 10, 10, 20, 20, 20, 30, 30, 30]),
             [10, 20, 30]
         );
     }
