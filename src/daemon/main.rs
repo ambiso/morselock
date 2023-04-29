@@ -2,6 +2,7 @@
 
 use std::{collections::VecDeque, error::Error, str::FromStr};
 
+use log::{debug, info};
 use morselock::{decode_morse_symbol_sequence, encode_letter, k_means_clustering, MorseSymbol};
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions};
 
@@ -87,6 +88,7 @@ fn gaussian_blur_average(image: &VecDeque<f64>, pixel_index: usize, kernel: &[f6
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
     let db_url = dotenvy::var("DATABASE_URL").unwrap_or("sqlite:db.sqlite".to_string());
     let mut db = SqliteConnectOptions::from_str(&db_url)?
         .create_if_missing(true)
@@ -128,14 +130,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }));
         input.extend(vec![0.0; 50]);
         use rand_distr::{Distribution, Normal};
-        let normal = Normal::new(0.0, 1.0/4.0).unwrap();
+        let normal = Normal::new(0.0, 1.0 / 4.0).unwrap();
         for x in input.iter_mut() {
             *x += normal.sample(&mut rand::thread_rng());
         }
     }
 
     let kernel_size = raw_window_size;
-    let sigma = 7.0;
+    let sigma = 6.0;
     let kernel = gaussian_kernel(kernel_size, sigma);
 
     use textplots::{Chart, Plot, Shape};
@@ -180,13 +182,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if new == prev {
                 run_length += 1;
             } else {
-                let max_space_length =
-                    lengths[false as usize].map(|low_lengths| 4 * low_lengths[0]);
-                if let Some(max_space_length) = max_space_length {
-                    if !prev && run_length > max_space_length {
+                let low_dit_length = lengths[false as usize].map(|low_lengths| low_lengths[0]);
+                if let Some(low_dit_length) = low_dit_length {
+                    if !prev && run_length >= 6 * low_dit_length {
                         // discard space lengths longer than 5 times the dot length
-                        eprintln!("Discarding run length {run_length} because it is too long");
-                        run_length = max_space_length;
+                        info!("Reset: {run_length} long space");
+                        run_length = low_dit_length;
                     }
                 }
                 run_lengths.push_back((prev, run_length));
@@ -215,17 +216,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                         let (symbol, run_length) = run_lengths[run_lengths.len() / 2];
 
-                        eprintln!("Classifying {symbol} with run_length {run_length}");
+                        debug!("Classifying {symbol} with run_length {run_length}");
                         // classify currently looked at run_length
                         if symbol {
                             // are we looking for dot/dash or for spacing?
                             if (run_length - dot_length).abs() < (run_length - dash_length).abs() {
                                 // dot
-                                eprintln!("Dot");
+                                debug!("Dot");
                                 symbols.push(MorseSymbol::Dot);
                             } else {
                                 // dash
-                                eprintln!("Dash");
+                                debug!("Dash");
                                 symbols.push(MorseSymbol::Dash);
                             }
                         } else {
@@ -233,7 +234,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 < (run_length - space_length).abs()
                             {
                                 // inter symbol (awaiting next dot or dash)
-                                eprintln!("Waiting for next symbol");
+                                debug!("Waiting for next symbol");
                             } else {
                                 // finish this letter
                                 // dbg!(&symbols);
@@ -244,7 +245,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 if let Some(letter) = decode_morse_symbol_sequence(&symbols) {
                                     decoded.push_back(letter);
                                 }
-                                if decoded.len() >= 5 {
+                                info!("Decoded: {decoded:?}");
+                                if decoded.len() >= 10 {
                                     break;
                                 }
                                 symbols.clear();
@@ -262,20 +264,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
     }
-    println!("blurred");
 
-    Chart::new(400, 32, 0.0, blurred.len() as f32)
-        .lineplot(&Shape::Lines(
+    use plotters::prelude::*;
+
+    let root = BitMapBackend::new("blurred.png", (1920, 1080)).into_drawing_area();
+    root.fill(&WHITE)?;
+    let mut chart = ChartBuilder::on(&root)
+        .caption("blurred data", ("sans-serif", 50).into_font())
+        .margin(5)
+        .x_label_area_size(30)
+        .y_label_area_size(30)
+        .build_cartesian_2d(-0f32..blurred.len() as f32, -0.3f32..1.3f32)?;
+
+    chart.configure_mesh().draw()?;
+
+    chart
+        .draw_series(LineSeries::new(
             blurred
                 .iter()
                 .enumerate()
-                .map(|x| (x.0 as f32, *x.1 as f32))
-                .collect::<Vec<_>>()
-                .as_slice(),
-        ))
-        .display();
+                .map(|x| (x.0 as f32, *x.1 as f32)),
+            &RED,
+        ))?;
 
-    dbg!(decoded);
+    chart
+        .configure_series_labels()
+        .background_style(&WHITE.mix(0.8))
+        .border_style(&BLACK)
+        .draw()?;
+
+    root.present()?;
 
     Ok(())
 }
