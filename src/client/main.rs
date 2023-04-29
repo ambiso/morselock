@@ -1,18 +1,18 @@
+use clap::Parser;
 use qrcode::{render::unicode, QrCode};
 use rand::RngCore;
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions};
 use std::{error::Error, str::FromStr};
-use structopt::StructOpt;
-use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{self, AsyncBufReadExt};
 use totp_rs::{Algorithm, TOTP};
 
-#[derive(StructOpt, Debug)]
+#[derive(Parser, Debug)]
 struct Opt {
-    #[structopt(subcommand)] // Note that we mark a field as a subcommand
+    #[command(subcommand)] // Note that we mark a field as a subcommand
     cmd: Command,
 }
 
-#[derive(StructOpt, Debug)]
+#[derive(Parser, Debug)]
 enum Command {
     /// Add a new user
     AddUser { name: String },
@@ -24,7 +24,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
     let db_url = dotenvy::var("DATABASE_URL").unwrap_or("sqlite:db.sqlite".to_string());
     let mut db = SqliteConnectOptions::from_str(&db_url)?
         .create_if_missing(true)

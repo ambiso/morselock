@@ -17,16 +17,24 @@ path = "src/lib.rs"
 
 
 [dependencies]
+async-trait = "0.1.68"
+clap = { version = "4.2.5", features = ["derive"] }
+console-subscriber = "0.1.8"
+cpal = "0.15.2"
+ctrlc = "3.2.5"
 dotenvy = "0.15.7"
 env_logger = "0.10.0"
+futures = "0.3.28"
 lazy_static = "1.4.0"
 log = "0.4.17"
 plotters = "0.3.4"
 qrcode = { version = "0.12.0", features = [] }
 rand = "0.8.5"
 rand_distr = "0.4.3"
+serde = { version = "1.0.160", features = ["serde_derive"] }
+serde_derive = "1.0.160"
 sqlx = { version = "0.6.3", features = ["runtime-tokio-rustls", "sqlite"] }
-structopt = "0.3.26"
-textplots = "0.8.0"
 tokio = { version = "1.28.0", features = ["full"] }
+tokio-stream = "0.1.14"
 totp-rs = { version = "5.0.1", features = ["otpauth"] }
+
