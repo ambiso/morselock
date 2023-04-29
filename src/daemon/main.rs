@@ -47,6 +47,44 @@ fn get_lengths(d: impl Iterator<Item = bool>, mode: bool) -> [i32; 2] {
 //     lengths
 // }
 
+fn gaussian(x: f64, sigma: f64) -> f64 {
+    let numerator = (-0.5 * x.powi(2)) / sigma.powi(2);
+    let denominator = (2.0 * std::f64::consts::PI * sigma.powi(2)).sqrt();
+    (numerator.exp()) / denominator
+}
+
+fn gaussian_kernel(kernel_size: usize, sigma: f64) -> Vec<f64> {
+    let mut kernel = Vec::with_capacity(kernel_size);
+    let half_kernel_size = (kernel_size / 2) as isize;
+
+    for i in -(half_kernel_size as isize)..=(half_kernel_size as isize) {
+        kernel.push(gaussian(i as f64, sigma));
+    }
+
+    kernel
+}
+
+fn gaussian_blur_average(image: &VecDeque<f64>, pixel_index: usize, kernel: &[f64]) -> f64 {
+    let half_kernel_size = kernel.len() / 2;
+
+    let mut blurred_pixel = 0.0;
+    let mut kernel_sum = 0.0;
+
+    for i in 0..kernel.len() {
+        if let Some(index) = i
+            .checked_sub(half_kernel_size)
+            .and_then(|i| pixel_index.checked_add(i))
+        {
+            if index < image.len() {
+                blurred_pixel += image[index] * kernel[i];
+                kernel_sum += kernel[i];
+            }
+        }
+    }
+
+    blurred_pixel / kernel_sum
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     let db_url = dotenvy::var("DATABASE_URL").unwrap_or("sqlite:db.sqlite".to_string());
@@ -62,35 +100,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut sensor_data = VecDeque::with_capacity(raw_window_size);
     let mut sum = 0.0;
 
-    let dot_len = 10;
-    let dash_len = 30;
-    let inter_symbol_len = 10;
-    let space_len = 20;
     let mut input = vec![0.0; 50];
-    input.extend("YOLO".chars().flat_map(|ch| {
-        let encoded = encode_letter(ch).unwrap();
-        let mut encoded: Vec<_> = encoded
-            .iter()
-            .flat_map(|symbol| match symbol {
-                MorseSymbol::Dot => {
-                    let mut x = vec![1.0; dot_len];
-                    x.extend(vec![0.0; inter_symbol_len]);
-                    x
-                }
-                MorseSymbol::Dash => {
-                    let mut x = vec![1.0; dash_len];
-                    x.extend(vec![0.0; inter_symbol_len]);
-                    x
-                }
-            })
-            .collect();
-        encoded.extend(vec![0.0; space_len]);
-        encoded
-    }));
+    {
+        let dot_len = 10;
+        let dash_len = 30;
+        let inter_symbol_len = 10;
+        let space_len = 20;
+        input.extend("YOLO".chars().flat_map(|ch| {
+            let encoded = encode_letter(ch).unwrap();
+            let mut encoded: Vec<_> = encoded
+                .iter()
+                .flat_map(|symbol| match symbol {
+                    MorseSymbol::Dot => {
+                        let mut x = vec![1.0; dot_len];
+                        x.extend(vec![0.0; inter_symbol_len]);
+                        x
+                    }
+                    MorseSymbol::Dash => {
+                        let mut x = vec![1.0; dash_len];
+                        x.extend(vec![0.0; inter_symbol_len]);
+                        x
+                    }
+                })
+                .collect();
+            encoded.extend(vec![0.0; space_len]);
+            encoded
+        }));
+        input.extend(vec![0.0; 50]);
+        use rand_distr::{Distribution, Normal};
+        let normal = Normal::new(0.0, 1.0/4.0).unwrap();
+        for x in input.iter_mut() {
+            *x += normal.sample(&mut rand::thread_rng());
+        }
+    }
+
+    let kernel_size = raw_window_size;
+    let sigma = 7.0;
+    let kernel = gaussian_kernel(kernel_size, sigma);
 
     use textplots::{Chart, Plot, Shape};
-
-    input.extend(vec![0.0; 50]);
 
     println!("input");
 
@@ -118,13 +166,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut n = 20;
 
+    let mut blurred = Vec::new();
+
     loop {
         if sensor_data.len() >= raw_window_size {
             sum -= sensor_data.pop_front().unwrap();
             let mean = sum / sensor_data.len() as f64;
-            // TODO: blur data
-            let prev = sensor_data[sensor_data.len() / 2 - 1] > mean;
-            let new = sensor_data[sensor_data.len() / 2] > mean;
+            let mid = sensor_data.len() / 2;
+            let prev = gaussian_blur_average(&sensor_data, mid - 1, &kernel) > mean;
+            let bl = gaussian_blur_average(&sensor_data, mid, &kernel);
+            let new = bl > mean;
+            blurred.push(bl);
             if new == prev {
                 run_length += 1;
             } else {
@@ -192,7 +244,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 if let Some(letter) = decode_morse_symbol_sequence(&symbols) {
                                     decoded.push_back(letter);
                                 }
-                                if decoded.len() > 10 {
+                                if decoded.len() >= 5 {
                                     break;
                                 }
                                 symbols.clear();
@@ -210,11 +262,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
     }
-    println!("dot_lengths");
+    println!("blurred");
 
-    Chart::new(400, 32, 0.0, dot_lengths.len() as f32)
+    Chart::new(400, 32, 0.0, blurred.len() as f32)
         .lineplot(&Shape::Lines(
-            dot_lengths
+            blurred
                 .iter()
                 .enumerate()
                 .map(|x| (x.0 as f32, *x.1 as f32))
