@@ -1,5 +1,6 @@
 // Watches the sensor and compares it with the db
 
+use plotters::style::full_palette::ORANGE;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -12,7 +13,7 @@ use std::{collections::VecDeque, error::Error, str::FromStr};
 
 use futures::StreamExt;
 use log::{debug, info, warn};
-use morselock::{decode_morse_symbol_sequence, k_means_clustering, MorseSymbol, from_words};
+use morselock::{decode_morse_symbol_sequence, from_words, k_means_clustering, MorseSymbol};
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions};
 
 use async_trait::async_trait;
@@ -262,7 +263,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut lengths: [Option<[i32; 2]>; 2] = [None, None];
 
-    let mut blurred = Vec::new();
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
 
@@ -274,6 +274,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut prev = false;
     let mut discounted_mean = 0.0;
     let mut first = true;
+
+    let mut decisions = Vec::new();
+    let mut blurred = Vec::new();
+    let mut discounted_means = Vec::new();
+    let mut deadzone_mins = Vec::new();
+    let mut deadzone_maxs = Vec::new();
 
     while running.load(Ordering::SeqCst) {
         use Sensor;
@@ -314,7 +320,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } else {
             bl > discounted_mean
         };
-        blurred.push(new as i8);
+        decisions.push(new as i8);
+        discounted_means.push(discounted_mean);
+        deadzone_mins.push(deadzone_min);
+        deadzone_maxs.push(deadzone_max);
+        blurred.push(bl);
+
         if new == prev {
             run_length += 1;
         } else {
@@ -401,23 +412,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     use plotters::prelude::*;
 
-    let root = BitMapBackend::new("blurred.png", (1920, 1080)).into_drawing_area();
+    let ymin = *blurred
+        .iter()
+        .min_by(|x, y| x.partial_cmp(y).unwrap())
+        .unwrap() as f32;
+    let ymax = *blurred
+        .iter()
+        .max_by(|x, y| x.partial_cmp(y).unwrap())
+        .unwrap() as f32;
+
+    let root =
+        BitMapBackend::new("blurred.png", (blurred.len() as u32 * 3, 1080)).into_drawing_area();
     root.fill(&WHITE)?;
     let mut chart = ChartBuilder::on(&root)
-        .caption("blurred data", ("sans-serif", 50).into_font())
+        .caption("data", ("sans-serif", 50).into_font())
         .margin(5)
         .x_label_area_size(30)
         .y_label_area_size(30)
-        .build_cartesian_2d(-0f32..blurred.len() as f32, -0.3f32..1.3f32)?;
+        .build_cartesian_2d(-0f32..decisions.len() as f32, ymin..ymax)?;
 
     chart.configure_mesh().draw()?;
+
+    chart.draw_series(LineSeries::new(
+        decisions
+            .iter()
+            .enumerate()
+            .map(|x| (x.0 as f32, *x.1 as f32 * (ymax - ymin) + ymin)),
+        &RED,
+    ))?;
+
+    let mut deadzone_vertices = vec![];
+    for (i, v) in deadzone_mins.iter().enumerate() {
+        deadzone_vertices.push((i as f32, *v as f32));
+    }
+    for (i, v) in deadzone_maxs.iter().enumerate().rev() {
+        deadzone_vertices.push((i as f32, *v as f32));
+    }
+    deadzone_vertices.push((0.0, deadzone_mins[0] as f32));
+
+    chart.draw_series(std::iter::once(Polygon::new(
+        deadzone_vertices,
+        &BLACK.mix(0.2),
+    )))?;
 
     chart.draw_series(LineSeries::new(
         blurred
             .iter()
             .enumerate()
             .map(|x| (x.0 as f32, *x.1 as f32)),
-        &RED,
+        &BLUE,
+    ))?;
+
+    chart.draw_series(LineSeries::new(
+        discounted_means
+            .iter()
+            .enumerate()
+            .map(|x| (x.0 as f32, *x.1 as f32)),
+        &ORANGE,
     ))?;
 
     chart
