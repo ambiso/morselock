@@ -12,7 +12,7 @@ use std::{collections::VecDeque, error::Error, str::FromStr};
 
 use futures::StreamExt;
 use log::{debug, info, warn};
-use morselock::{decode_morse_symbol_sequence, k_means_clustering, MorseSymbol};
+use morselock::{decode_morse_symbol_sequence, k_means_clustering, MorseSymbol, from_words};
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions};
 
 use async_trait::async_trait;
@@ -159,9 +159,12 @@ struct Opt {
     /// Number of raw samples to keep in memory. Used to predict whether new samples are a low or a high signal. Higher will take longer to adjust to changes, but it must be at least as long as a symbol (e.g. a dot-dash)
     #[arg(long, default_value = "500")]
     raw_window_size: usize,
-    #[arg(long, default_value = "40")]
+    #[arg(long, default_value = "20")]
     /// The number of run-lengths to store (transitions between high and low). Used to estimate the symbol length. Higher memory will be more accurate, but will take longer to adjust to changes in the symbol length.
     run_length_memory_size: usize,
+    #[arg(long, default_value = "200")]
+    /// Number of run_lengths to store and decode into the past.
+    decode_memory_size: usize,
     #[arg(long, default_value = "3.0")]
     /// Sigma of the gaussian blur. Higher will make it more noise resistant, but can make it miss very short dit-s.
     sigma: f64,
@@ -181,7 +184,6 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    console_subscriber::init();
     env_logger::init();
     let db_url = dotenvy::var("DATABASE_URL").unwrap_or("sqlite:db.sqlite".to_string());
     let mut db = SqliteConnectOptions::from_str(&db_url)?
@@ -252,12 +254,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut sensor = microphone_sensor(opt.sample_rate).await;
 
     let mut symbols = Vec::with_capacity(10);
-    let mut decoded = VecDeque::with_capacity(10);
 
     let mut dot_lengths = Vec::new();
 
     let mut run_length = 1;
-    let mut run_lengths = VecDeque::with_capacity(opt.run_length_memory_size);
+    let mut run_lengths = VecDeque::with_capacity(opt.decode_memory_size);
 
     let mut lengths: [Option<[i32; 2]>; 2] = [None, None];
 
@@ -282,7 +283,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if let Some(d) = sensor.read().await {
             sensor_data.push_back(d);
         } else {
-            println!("No more data");
+            warn!("No more data");
             break;
         }
 
@@ -317,15 +318,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if new == prev {
             run_length += 1;
         } else {
-            let low_dit_length = lengths[false as usize].map(|low_lengths| low_lengths[0]);
-            if let Some(low_dit_length) = low_dit_length {
-                let max_factor = 4;
-                if !prev && run_length >= max_factor * low_dit_length && low_dit_length >= 1 {
-                    // discard space lengths longer than max_factor times the dot length
-                    debug!("Lowering long space: {run_length} long space; expected up to {max_factor} * {} = {}. Lowering to {}", low_dit_length, max_factor * low_dit_length, 3 * low_dit_length);
-                    run_length = (3 * low_dit_length).min(opt.lag as i32);
-                }
-            }
+            // let low_dit_length = lengths[false as usize].map(|low_lengths| low_lengths[0]);
+            // if let Some(low_dit_length) = low_dit_length {
+            //     let max_factor = 4;
+            //     if !prev && run_length >= max_factor * low_dit_length && low_dit_length >= 1 {
+            //         // discard space lengths longer than max_factor times the dot length
+            //         debug!("Lowering long space: {run_length} long space; expected up to {max_factor} * {} = {}. Lowering to {}", low_dit_length, max_factor * low_dit_length, 3 * low_dit_length);
+            //         run_length = (3 * low_dit_length).min(opt.lag as i32);
+            //     }
+            // }
             if run_lengths.len() >= run_lengths.capacity() {
                 run_lengths.pop_front();
             }
@@ -336,7 +337,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
             for mode in [false, true] {
                 let run_lengths = run_lengths
                     .iter()
+                    .rev()
                     .filter(|x| x.0 == mode)
+                    .take(opt.run_length_memory_size)
                     .map(|x| x.1)
                     .collect::<Vec<_>>();
 
@@ -353,46 +356,44 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 dot_lengths.push(dot_length);
                 // dbg!(lengths);
 
-                let (symbol, run_length) = run_lengths[run_lengths.len() - 1];
-
-                debug!("Classifying {symbol} with run_length {run_length} using {lengths:?}");
-                // classify currently looked at run_length
-                if symbol {
-                    // are we looking for dot/dash or for spacing?
-                    if (run_length - dot_length).abs() < (run_length - dash_length).abs() {
-                        // dot
-                        debug!("Dot");
-                        print!(".");
-                        symbols.push(MorseSymbol::Dot);
-                    } else {
-                        // dash
-                        debug!("Dash");
-                        print!("-");
-                        symbols.push(MorseSymbol::Dash);
-                    }
-                } else {
-                    if (run_length - inter_symbol_length).abs() < (run_length - space_length).abs()
-                    {
-                        // inter symbol (awaiting next dot or dash)
-                        // debug!("Waiting for next symbol");
-                    } else {
-                        // finish this letter
-                        if let Some(letter) = decode_morse_symbol_sequence(&symbols) {
-                            decoded.push_back(letter);
-                            print!("{letter}");
-                            let decoded_string: String = decoded.iter().collect();
-                            info!("Decoded: {decoded_string}, discounted_mean: {discounted_mean}");
+                let mut decoded = Vec::with_capacity(run_lengths.len() / 2);
+                for (symbol, run_length) in run_lengths.iter() {
+                    // classify currently looked at run_length
+                    if *symbol {
+                        // are we looking for dot/dash or for spacing?
+                        if (run_length - dot_length).abs() < (run_length - dash_length).abs() {
+                            // dot
+                            symbols.push(MorseSymbol::Dot);
                         } else {
-                            debug!("Invalid morse sequence");
-                            print!("?");
+                            // dash
+                            symbols.push(MorseSymbol::Dash);
                         }
-                        if decoded.len() >= 10 {
-                            decoded.pop_front();
+                    } else {
+                        let word_sep_len = 7 * dot_length;
+
+                        if (run_length - inter_symbol_length).abs()
+                            < (run_length - space_length).abs()
+                        {
+                            // inter symbol (awaiting next dot or dash)
+                            // debug!("Waiting for next symbol");
+                        } else {
+                            // finish this letter
+                            if let Some(letter) = decode_morse_symbol_sequence(&symbols) {
+                                decoded.push(letter);
+                            } else {
+                                debug!("Invalid morse sequence: {symbols:?}");
+                            }
+                            if (run_length - word_sep_len).abs() < (run_length - space_length).abs()
+                            {
+                                decoded.push(' ');
+                            }
+                            symbols.clear();
                         }
-                        symbols.clear();
                     }
                 }
-                std::io::stdout().flush().unwrap();
+                let decoded_string: String = decoded.iter().collect();
+                info!("Decoded: {decoded_string}");
+                info!("Number decoded: {}", from_words(&decoded_string));
             }
         }
         prev = new;

@@ -1,7 +1,9 @@
 #![feature(iterator_try_collect)]
 use std::collections::HashMap;
 
+use distance::levenshtein;
 use lazy_static::lazy_static;
+use log::info;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum MorseSymbol {
@@ -141,4 +143,33 @@ mod tests {
             [10, 20, 30]
         );
     }
+}
+
+lazy_static! {
+    static ref WORDLIST: HashMap<&'static str, i32> = {
+        let mut m = HashMap::new();
+        for (i, w) in include_str!("wordlist.txt").trim().split("\n").enumerate() {
+            m.insert(w, i as i32);
+        }
+        m
+    };
+}
+
+pub fn from_words(s: &str) -> i128 {
+    let v = s.split(" ").collect::<Vec<_>>();
+    v.iter()
+        .rev()
+        .take(2)
+        .rev()
+        .map(|w| {
+            info!("Word: {w}");
+            WORDLIST.get(w).unwrap_or_else(|| {
+                let closest = WORDLIST.iter().min_by_key(|x| levenshtein(x.0, w)).unwrap();
+                info!("closest: {}", closest.0);
+                closest.1
+            })
+        })
+        .fold(0i128, |a, x| {
+            a as i128 * WORDLIST.len() as i128 + *x as i128
+        })
 }
