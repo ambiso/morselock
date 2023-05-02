@@ -725,6 +725,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7bad48618fdb549078c333a7a8528acb57af271d0433bdecd523eb620628364e"
 
 [[package]]
+name = "float_extras"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b22b70f8649ea2315955f1a36d964b0e4da482dfaa5f0d04df0d1fb7c338ab7a"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "flume"
 version = "0.10.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1322,6 +1331,7 @@ dependencies = [
  "log",
  "plotters",
  "qrcode",
+ "quantogram",
  "rand",
  "rand_distr",
  "serde",
@@ -1746,6 +1756,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quantogram"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77d61f6f89661d840abdcae69a8b2d9c8ce20e9e7dd2c52a78ab4377b435b343"
+dependencies = [
+ "float_extras",
+ "skiplist",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2013,6 +2033,15 @@ name = "simd-adler32"
 version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "238abfbb77c1915110ad968465608b68e869e0772622c9656714e73e5a1a522f"
+
+[[package]]
+name = "skiplist"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa37347a2b4609765d113afe55f16636ccd42dadc1ad0d29030908d1bac4c95b"
+dependencies = [
+ "rand",
+]
 
 [[package]]
 name = "slab"

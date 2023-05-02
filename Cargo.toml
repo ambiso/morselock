@@ -29,6 +29,7 @@ lazy_static = "1.4.0"
 log = "0.4.17"
 plotters = "0.3.4"
 qrcode = { version = "0.12.0", features = [] }
+quantogram = "0.4.4"
 rand = "0.8.5"
 rand_distr = "0.4.3"
 serde = { version = "1.0.160", features = ["serde_derive"] }

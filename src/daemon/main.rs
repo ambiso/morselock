@@ -1,6 +1,7 @@
 // Watches the sensor and compares it with the db
 
 use plotters::style::full_palette::ORANGE;
+use quantogram::Quantogram;
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -157,9 +158,9 @@ async fn microphone_sensor(sample_rate: usize) -> impl Sensor {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Opt {
-    /// Number of raw samples to keep in memory. Used to predict whether new samples are a low or a high signal. Higher will take longer to adjust to changes, but it must be at least as long as a symbol (e.g. a dot-dash)
-    #[arg(long, default_value = "500")]
-    raw_window_size: usize,
+    /// Number of samples to keep in memory. Used to predict whether new samples are a low or a high signal. Higher will take longer to adjust to changes, but too low and we will forget what was high and what was low.
+    #[arg(long, default_value = "2000")]
+    channel_memory_size: usize,
     #[arg(long, default_value = "20")]
     /// The number of run-lengths to store (transitions between high and low). Used to estimate the symbol length. Higher memory will be more accurate, but will take longer to adjust to changes in the symbol length.
     run_length_memory_size: usize,
@@ -172,9 +173,6 @@ struct Opt {
     #[arg(long, default_value = "50")]
     /// Number of samples to wait before processing it.
     lag: usize,
-    #[arg(long, default_value = "0.9")]
-    /// Discount factor on the threshold value. Closer to 1 will make changes in high/low thresholding slower.
-    mean_discount_factor: f64,
     #[arg(long, default_value = "0.3")]
     /// Centered region to ignore high/low transitions in. (Between 0 and 1, values lower than 0.5 recommended)
     deadzone: f64,
@@ -208,7 +206,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Play the input stream to start capturing microphone data.
 
-    let mut sensor_data = VecDeque::with_capacity(opt.raw_window_size);
+    let mut sensor_data = VecDeque::with_capacity(opt.channel_memory_size);
 
     // let mut input = vec![0.0; 50];
     // {
@@ -272,14 +270,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     })?;
 
     let mut prev = false;
-    let mut discounted_mean = 0.0;
-    let mut first = true;
 
     let mut decisions = Vec::new();
     let mut blurred = Vec::new();
-    let mut discounted_means = Vec::new();
+    let mut thresholds = Vec::new();
     let mut deadzone_mins = Vec::new();
     let mut deadzone_maxs = Vec::new();
+
+    let mut q = Quantogram::new();
+    let mut blur_queue = VecDeque::with_capacity(opt.channel_memory_size);
 
     while running.load(Ordering::SeqCst) {
         use Sensor;
@@ -298,30 +297,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
             continue;
         }
 
-        let mean = sensor_data.iter().sum::<f64>() / sensor_data.len() as f64;
-        if first {
-            discounted_mean = mean;
-            first = false;
-        } else {
-            discounted_mean *= opt.mean_discount_factor;
-            discounted_mean += (1.0 - opt.mean_discount_factor) * mean;
-        }
-        let min = sensor_data.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-        let max = sensor_data.iter().fold(-f64::INFINITY, |a, &b| a.max(b));
-        let span = max - min;
-        let deadzone = opt.deadzone; // dont make decisions in the middle 30%
-        let deadzone_min = discounted_mean - span * deadzone / 2.;
-        let deadzone_max = discounted_mean + span * deadzone / 2.;
         let mid = sensor_data.len() - lag;
         let bl = gaussian_blur_average(&sensor_data, mid, &kernel);
+        if blur_queue.len() >= blur_queue.capacity() {
+            q.remove(blur_queue.pop_front().unwrap());
+        }
+        blur_queue.push_back(bl);
+        q.add(bl);
+        let min = q.quantile(0.99).unwrap_or(0.0);
+        let max = q.quantile(0.01).unwrap_or(0.0);
+        let span = max - min;
+        let thresh = span * 0.5 + min;
+        let deadzone_min = thresh - opt.deadzone * span / 2.0;
+        let deadzone_max = thresh + opt.deadzone * span / 2.0;
+
         let new = if bl > deadzone_min && bl < deadzone_max {
             // debug!("In deadzone with {deadzone_min} < {bl} < {deadzone_max} (data range: {min} - {max})");
             prev
         } else {
-            bl > discounted_mean
+            bl > thresh
         };
         decisions.push(new as i8);
-        discounted_means.push(discounted_mean);
+        thresholds.push(thresh);
         deadzone_mins.push(deadzone_min);
         deadzone_maxs.push(deadzone_max);
         blurred.push(bl);
@@ -464,7 +461,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ))?;
 
     chart.draw_series(LineSeries::new(
-        discounted_means
+        thresholds
             .iter()
             .enumerate()
             .map(|x| (x.0 as f32, *x.1 as f32)),
