@@ -2,12 +2,9 @@
 
 use plotters::style::full_palette::ORANGE;
 use quantogram::Quantogram;
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::fs;
-use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc as async_mpsc;
 
 use std::{collections::VecDeque, error::Error, str::FromStr};
@@ -24,7 +21,6 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 
 use clap::{arg, Parser};
-use serde_derive::Deserialize;
 
 #[async_trait]
 trait Sensor {
@@ -304,8 +300,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         blur_queue.push_back(bl);
         q.add(bl);
-        let min = q.quantile(0.99).unwrap_or(0.0);
-        let max = q.quantile(0.01).unwrap_or(0.0);
+        let min = q.quantile(0.01).unwrap_or(0.0);
+        let max = q.quantile(0.99).unwrap_or(0.0);
         let span = max - min;
         let thresh = span * 0.5 + min;
         let deadzone_min = thresh - opt.deadzone * span / 2.0;
@@ -357,7 +353,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         Some(k_means_clustering(lengths[mode as usize], &run_lengths));
                 }
             }
-            if let [Some([inter_symbol_length, space_length]), Some([dot_length, dash_length])] =
+            if let [Some([inter_symbol_length, _space_length]), Some([dot_length, dash_length])] =
                 lengths
             {
                 let space_length = 3 * dot_length;
