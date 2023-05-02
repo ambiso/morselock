@@ -1,9 +1,12 @@
 #![feature(iterator_try_collect)]
-use std::collections::HashMap;
+use core::panic;
+use std::{
+    collections::{hash_map::DefaultHasher, HashMap},
+    fmt::Display,
+    hash::{Hash, Hasher},
+};
 
-use distance::levenshtein;
 use lazy_static::lazy_static;
-use log::info;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 pub enum MorseSymbol {
@@ -145,31 +148,112 @@ mod tests {
     }
 }
 
-lazy_static! {
-    static ref WORDLIST: HashMap<&'static str, i32> = {
-        let mut m = HashMap::new();
-        for (i, w) in include_str!("wordlist.txt").trim().split("\n").enumerate() {
-            m.insert(w, i as i32);
-        }
-        m
-    };
+struct Base36 {
+    n: u64,
+    pad: i32,
 }
 
-pub fn from_words(s: &str) -> i128 {
-    let v = s.split(" ").collect::<Vec<_>>();
-    v.iter()
-        .rev()
-        .take(2)
-        .rev()
-        .map(|w| {
-            info!("Word: {w}");
-            WORDLIST.get(w).unwrap_or_else(|| {
-                let closest = WORDLIST.iter().min_by_key(|x| levenshtein(x.0, w)).unwrap();
-                info!("closest: {}", closest.0);
-                closest.1
-            })
-        })
-        .fold(0i128, |a, x| {
-            a as i128 * WORDLIST.len() as i128 + *x as i128
-        })
+impl Display for Base36 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.n;
+        if n == 0 && self.pad <= 1 {
+            return write!(f, "0");
+        }
+        let r = n % 36;
+        let c = if r >= 10 {
+            ((r - 10) + 'A' as u64) as u8 as char
+        } else {
+            (r + '0' as u64) as u8 as char
+        };
+        let d = n / 36;
+        if self.pad > 1 || d != 0 {
+            write!(
+                f,
+                "{}{c}",
+                Base36 {
+                    n: d,
+                    pad: self.pad - 1
+                }
+            )?;
+        } else {
+            write!(f, "{c}")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn base36(n: u64, pad: u32) -> String {
+    format!("{}", Base36 { n, pad: pad as i32 })
+}
+
+pub fn generate_code(n: u64) -> String {
+    let mut hasher = DefaultHasher::new();
+    n.hash(&mut hasher);
+    let n = (n << 8) | (hasher.finish() & 0xff);
+    format!("{}", Base36 { n, pad: 6 })
+}
+
+fn decode_base36(s: &[u8]) -> u64 {
+    let mut rv = 0u64;
+    for &x in s {
+        rv += if x >= '0' as u8 && x <= '9' as u8 {
+            x - '0' as u8
+        } else if x >= 'A' as u8 && x <= 'Z' as u8 {
+            (x - 'A' as u8) + 10
+        } else {
+            panic!()
+        } as u64;
+        rv *= 36;
+    }
+    rv
+}
+
+fn try_decode(s: &[u8]) -> Option<u64> {
+    let n = decode_base36(s);
+    let h = n & 0xff;
+    let n = n >> 8;
+    let mut hasher = DefaultHasher::new();
+    n.hash(&mut hasher);
+    if hasher.finish() & 0xff == h {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+pub fn decode_code(s: &str) -> Vec<u64> {
+    // detect codes, check their validity and return the valid ones
+    let mut rv = vec![];
+    let s: Vec<u8> = s.chars().filter(|x| *x != ' ').map(|x| x as u8).collect();
+    let min_code_length = 6;
+    let max_code_length = 6;
+    for i in 0..s.len() {
+        for j in i + min_code_length..=s.len().min(i + max_code_length + 1) {
+            // for all non-empty subsequences
+            let s = &s[i..j];
+            if let Some(n) = try_decode(s) {
+                rv.push(n);
+            }
+        }
+    }
+    rv
+}
+
+#[cfg(test)]
+mod test {
+    use crate::base36;
+
+    #[test]
+    fn test_base36() {
+        assert_eq!(&base36(0, 3), "000");
+        assert_eq!(&base36(1, 3), "001");
+        assert_eq!(&base36(10, 3), "00A");
+        assert_eq!(&base36(10 + 36, 3), "01A");
+        assert_eq!(&base36(35, 3), "00Z");
+        assert_eq!(&base36(36, 3), "010");
+        assert_eq!(&base36(36 * 36, 3), "100");
+        assert_eq!(&base36(36 * 36 * 35, 3), "Z00");
+        assert_eq!(&base36(36 * 36 * 36, 3), "1000");
+    }
 }

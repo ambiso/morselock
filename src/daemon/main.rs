@@ -11,7 +11,9 @@ use std::{collections::VecDeque, error::Error, str::FromStr};
 
 use futures::StreamExt;
 use log::{debug, info, warn};
-use morselock::{decode_morse_symbol_sequence, from_words, k_means_clustering, MorseSymbol};
+use morselock::{
+    decode_code, decode_morse_symbol_sequence, generate_code, k_means_clustering, MorseSymbol,
+};
 use sqlx::{sqlite::SqliteConnectOptions, ConnectOptions};
 
 use async_trait::async_trait;
@@ -276,6 +278,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut q = Quantogram::new();
     let mut blur_queue = VecDeque::with_capacity(opt.channel_memory_size);
 
+    info!("Some codes...");
+    for _ in 0..10 {
+        info!("Try code: {}", generate_code(789540));
+    }
+
     while running.load(Ordering::SeqCst) {
         use Sensor;
         if sensor_data.len() >= sensor_data.capacity() {
@@ -397,7 +404,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 let decoded_string: String = decoded.iter().collect();
                 info!("Decoded: {decoded_string}");
-                info!("Number decoded: {}", from_words(&decoded_string));
+                for code in decode_code(&decoded_string) {
+                    println!("Valid: {}", code);
+                }
             }
         }
         prev = new;
